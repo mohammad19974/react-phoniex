@@ -1,0 +1,75 @@
+{
+  "name": "react-phoenix",
+  "version": "1.0.0",
+  "description": "React Phoenix is a lightweight toolkit that provides reusable components, hooks, and utilities designed to speed up React development while keeping your code clean, modular, and maintainable.",
+  "main": "dist/react-phoenix.umd.js",
+  "module": "dist/react-phoenix.es.js",
+  "exports": {
+    ".": {
+      "import": "./dist/react-phoenix-app.es.js",
+      "require": "./dist/react-phoenix-app.umd.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "react",
+    "vite",
+    "frontend"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:ui": "vitest --ui",
+    "test:watch": "vitest --watch",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "prepublishOnly": "npm run test:run && npm run build",
+    "version:patch": "npm version patch --no-git-tag-version && npm publish",
+    "version:minor": "npm version minor --no-git-tag-version && npm publish",
+    "version:major": "npm version major --no-git-tag-version && npm publish",
+    "release:patch": "npm run build && npm version patch --no-git-tag-version && npm publish",
+    "release:minor": "npm run build && npm version minor --no-git-tag-version && npm publish",
+    "release:major": "npm run build && npm version major --no-git-tag-version && npm publish",
+    "publish:beta": "npm run build && npm publish --tag beta",
+    "publish:latest": "npm run build && npm publish"
+  },
+  "peerDependencies": {
+    "react": ">=17.0.0",
+    "react-dom": ">=17.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.33.0",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.8.0",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^5.0.0",
+    "@vitest/coverage-v8": "^3.2.4",
+    "@vitest/ui": "^3.2.4",
+    "eslint": "^9.33.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.20",
+    "globals": "^16.3.0",
+    "jsdom": "^26.1.0",
+    "prettier": "^3.6.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "vite": "^7.1.2",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "phoenix": "^1.8.1"
+  }
+}

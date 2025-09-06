@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        id: node-modules-cache
+        with:
+          path: |
+            node_modules
+            ~/.npm
+          key: ${{ runner.os }}-node-${{ matrix.node-version }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-${{ matrix.node-version }}-
+            ${{ runner.os }}-node-
+
+      - name: Install dependencies
+        run: npm ci
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
+
+      - name: Install dependencies (cache miss)
+        run: npm ci
+        if: steps.node-modules-cache.outputs.cache-hit == 'true'
+
+      - name: Check code formatting
+        run: npm run format:check
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        id: build-cache
+        with:
+          path: |
+            dist/
+            .eslintcache
+          key: ${{ runner.os }}-build-${{ matrix.node-version }}-${{ hashFiles('src/**/*', 'package.json', 'vite.config.js') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ matrix.node-version }}-
+            ${{ runner.os }}-build-
+
+      - name: Run tests
+        run: npm run test:run
+
+      - name: Cache coverage data
+        uses: actions/cache@v4
+        if: matrix.node-version == '20.x'
+        with:
+          path: coverage/
+          key: ${{ runner.os }}-coverage-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-coverage-
+
+      - name: Run test coverage
+        run: npm run test:coverage
+        if: matrix.node-version == '20.x'
+
+      - name: Build project
+        run: npm run build
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v4
+        if: matrix.node-version == '20.x'
+        with:
+          file: ./coverage/lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
