@@ -122,6 +122,10 @@ export class PhoenixClient {
   }
 
   clearConfig(): void {
+    // Clear the config from storage
+    phoenixStorage.clearConfig();
+
+    // Update the connection manager with default values
     this.connectionManager.updateConfig({
       url: null,
       authParams: null,
