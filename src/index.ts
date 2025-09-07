@@ -9,8 +9,10 @@ export {
   setPhoenixEnv,
   initializePhoenixClient,
   getPhoenixClient,
-  PHOENIX_EVENTS,
 } from './phoenix-client';
+
+// Events
+export { PHOENIX_EVENTS } from './core/events';
 
 // Type exports
 export type {

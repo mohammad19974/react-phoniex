@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react';
-import phoenixClient, { PHOENIX_EVENTS } from '.';
+import phoenixClient from './phoenix-client';
+import { PHOENIX_EVENTS } from './core/events';
+import type { MessageCallback } from './types';
 
 /**
  * Optimized hook for listening to Phoenix channel messages
@@ -11,129 +13,80 @@ import phoenixClient, { PHOENIX_EVENTS } from '.';
 export const usePhoenixMessage = (
   topic: string,
   event: string,
-  callback: Function,
-  deps: any[] = []
+  callback: MessageCallback,
+  deps: React.DependencyList = []
 ): void => {
-  const callbackRef = useRef<Function>(callback);
+  const callbackRef = useRef<MessageCallback>(callback);
   const setupCompleteRef = useRef<boolean>(false);
-  const handlerRef = useRef<Function | null>(null);
+  const handlerRef = useRef<MessageCallback | null>(null);
+  const topicRef = useRef<string>(topic);
+  const eventRef = useRef<string>(event);
 
-  // Update callback ref when it changes
+  // Update refs when props change
   useEffect(() => {
     callbackRef.current = callback;
   }, [callback]);
 
   useEffect(() => {
+    topicRef.current = topic;
+  }, [topic]);
+
+  useEffect(() => {
+    eventRef.current = event;
+  }, [event]);
+
+  useEffect(() => {
+    // Validation
+    if (!topic || !event || !callback) {
+      console.warn('[usePhoenixMessage] Invalid parameters provided');
+      return;
+    }
+
     // Cleanup previous handler if exists
     if (handlerRef.current && setupCompleteRef.current) {
       try {
-        phoenixClient.offMessage(topic, event, handlerRef.current);
+        phoenixClient.offMessage(topicRef.current, eventRef.current, handlerRef.current);
         setupCompleteRef.current = false;
       } catch (error) {
-        console.warn(`Failed to remove previous message listener for ${topic}:${event}`, error);
+        console.warn(`[usePhoenixMessage] Failed to remove previous message listener`, error);
       }
     }
 
     // Create new stable callback wrapper
-    const messageHandler = (payload: any): void => {
-      callbackRef.current(payload);
+    const messageHandler: MessageCallback = payload => {
+      try {
+        callbackRef.current(payload);
+      } catch (error) {
+        console.error(`[usePhoenixMessage] Error in message handler for ${topic}:${event}:`, error);
+      }
     };
 
     // Store the handler reference for cleanup
     handlerRef.current = messageHandler;
 
-    // Function to setup listener
-    const setupListener = (): boolean => {
-      try {
-        // Use phoenixClient's public methods instead of accessing private channels
-        // We'll check if we can setup the listener by attempting to add it
-        // If the channel doesn't exist or isn't joined, phoenixClient will handle it
-
-        // Setup listener with the current handler
-        if (handlerRef.current) {
-          phoenixClient.onMessage(topic, event, handlerRef.current);
-        }
-        setupCompleteRef.current = true;
-
-        return true;
-      } catch (error) {
-        console.warn(`Failed to setup message listener for ${topic}:${event}`, error);
-        return false;
-      }
-    };
-
-    // Function to cleanup listener
-    const cleanupListener = () => {
-      if (setupCompleteRef.current && handlerRef.current) {
-        try {
-          phoenixClient.offMessage(topic, event, handlerRef.current);
-          setupCompleteRef.current = false;
-        } catch (error) {
-          console.warn(`Failed to remove message listener for ${topic}:${event}`, error);
-        }
-      }
-    };
-
-    // Try immediate setup
-    if (setupListener()) {
-      // Return cleanup function immediately
-      return cleanupListener;
+    // Setup listener
+    try {
+      phoenixClient.onMessage(topic, event, messageHandler);
+      setupCompleteRef.current = true;
+    } catch (error) {
+      console.warn(
+        `[usePhoenixMessage] Failed to setup message listener for ${topic}:${event}`,
+        error
+      );
     }
-
-    // If immediate setup failed, wait for connection/channel events
-    let retryCount = 0;
-    const maxRetries = 50; // 5 seconds with 100ms intervals
-    let retryInterval: NodeJS.Timeout | null = null;
-
-    const retrySetup = () => {
-      if (setupListener()) {
-        if (retryInterval) {
-          clearInterval(retryInterval);
-          retryInterval = null;
-        }
-        return;
-      }
-
-      retryCount++;
-      if (retryCount >= maxRetries) {
-        if (retryInterval) {
-          clearInterval(retryInterval);
-          retryInterval = null;
-        }
-      }
-    };
-
-    // Setup retry interval
-    retryInterval = setInterval(retrySetup, 100);
-
-    // Also listen for Phoenix events that might indicate channel is ready
-    const handlePhoenixEvent = (): void => {
-      if (!setupCompleteRef.current) {
-        if (setupListener() && retryInterval) {
-          clearInterval(retryInterval);
-          retryInterval = null;
-        }
-      }
-    };
-
-    phoenixClient.addEventListener(PHOENIX_EVENTS.CONNECT, handlePhoenixEvent);
-    phoenixClient.addEventListener(PHOENIX_EVENTS.RECONNECT, handlePhoenixEvent);
 
     // Cleanup function
     return () => {
-      // Clear retry interval
-      if (retryInterval) {
-        clearInterval(retryInterval);
+      if (setupCompleteRef.current && handlerRef.current) {
+        try {
+          phoenixClient.offMessage(topicRef.current, eventRef.current, handlerRef.current);
+          setupCompleteRef.current = false;
+        } catch (error) {
+          console.warn(`[usePhoenixMessage] Failed to remove message listener`, error);
+        }
       }
-
-      // Remove Phoenix event listeners
-      phoenixClient.removeEventListener(PHOENIX_EVENTS.CONNECT, handlePhoenixEvent);
-      phoenixClient.removeEventListener(PHOENIX_EVENTS.RECONNECT, handlePhoenixEvent);
-
-      // Clean up message listener
-      cleanupListener();
     };
-  }, [topic, event, ...deps]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [topic, event, ...deps]);
 };
 
 export default usePhoenixMessage;

@@ -16,9 +16,10 @@
   "keywords": [
     "react",
     "vite",
-    "frontend"
+    "frontend",
+    "phoenix"
   ],
-  "author": "Your Name",
+  "author": "Mohammad Jamil",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -53,6 +54,7 @@
     "@testing-library/jest-dom": "^6.8.0",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.1",
+    "@types/phoenix": "^1.6.6",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
     "@typescript-eslint/eslint-plugin": "^8.42.0",

@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import phoenixClient, { PHOENIX_EVENTS } from '.';
-import type { UsePhoenixOptions, UsePhoenixReturn } from './types';
+import phoenixClient from './phoenix-client';
+import { PHOENIX_EVENTS } from './core/events';
+import type { UsePhoenixOptions, UsePhoenixReturn, PhoenixClient } from './types';
 
 /**
  * Optimized React hook for Phoenix WebSocket connections
@@ -14,45 +15,69 @@ import type { UsePhoenixOptions, UsePhoenixReturn } from './types';
 export const usePhoenix = (options: UsePhoenixOptions = {}): UsePhoenixReturn => {
   const { endpoint, autoConnect = true, params, useLongPoll = false } = options;
 
-  // State management
-  const [connectionState, setConnectionState] = useState<string>(() =>
-    phoenixClient.getConnectionState()
+  // State management with better typing
+  const [connectionState, setConnectionState] = useState<UsePhoenixReturn['connectionState']>(
+    () => phoenixClient.getConnectionState() as UsePhoenixReturn['connectionState']
   );
-  const [error, setError] = useState<any>(null);
+  const [error, setError] = useState<Error | null>(null);
 
-  // Refs for stable callbacks
+  // Refs for stable callbacks and optimization
   const optionsRef = useRef<UsePhoenixOptions>({ endpoint, params });
   const hasInitializedRef = useRef<boolean>(false);
+  const eventHandlersRef = useRef<{
+    connect: () => void;
+    disconnect: () => void;
+    error: (errorData: Error) => void;
+    reconnect: () => void;
+  } | null>(null);
 
-  // Update options ref when they change
+  // Update options ref when they change (only when actually different)
   useEffect(() => {
-    optionsRef.current = { endpoint, params };
+    const newOptions = { endpoint, params };
+    const currentOptions = optionsRef.current;
+
+    // Deep compare to avoid unnecessary updates
+    if (
+      currentOptions.endpoint !== newOptions.endpoint ||
+      JSON.stringify(currentOptions.params) !== JSON.stringify(newOptions.params)
+    ) {
+      optionsRef.current = newOptions;
+    }
   }, [endpoint, params]);
 
-  // Stable event handlers
-  const handleConnect = useCallback((): void => {
-    setConnectionState('connected');
-    setError(null);
-  }, []);
+  // Create stable event handlers once
+  if (!eventHandlersRef.current) {
+    eventHandlersRef.current = {
+      connect: () => {
+        setConnectionState('connected');
+        setError(null);
+      },
+      disconnect: () => {
+        const clientState = phoenixClient.getConnectionState();
+        setConnectionState(clientState as UsePhoenixReturn['connectionState']);
+      },
+      error: (errorData: Error) => {
+        setError(errorData);
+        setConnectionState('error');
+      },
+      reconnect: () => {
+        setConnectionState('connected');
+        setError(null);
+      },
+    };
+  }
 
-  const handleDisconnect = useCallback((): void => {
-    const clientState = phoenixClient.getConnectionState();
-    setConnectionState(clientState);
-  }, []);
-
-  const handleError = useCallback((errorData: any): void => {
-    setError(errorData);
-    setConnectionState('error');
-  }, []);
-
-  const handleReconnect = useCallback((): void => {
-    setConnectionState('connected');
-    setError(null);
-  }, []);
+  const {
+    connect: handleConnect,
+    disconnect: handleDisconnect,
+    error: handleError,
+    reconnect: handleReconnect,
+  } = eventHandlersRef.current;
 
   // Connection management functions
   const connect = useCallback(async (connectOptions: UsePhoenixOptions = {}): Promise<void> => {
     if (!phoenixClient.canConnect()) {
+      console.warn('[usePhoenix] Cannot connect: client is not in a connectable state');
       return;
     }
 
@@ -67,8 +92,10 @@ export const usePhoenix = (options: UsePhoenixOptions = {}): UsePhoenixReturn =>
 
       await phoenixClient.connect(connectionOptions);
     } catch (err) {
-      setError(err);
+      const error = err instanceof Error ? err : new Error(String(err));
+      setError(error);
       setConnectionState('error');
+      console.error('[usePhoenix] Connection failed:', error);
     }
   }, []);
 
@@ -83,41 +110,54 @@ export const usePhoenix = (options: UsePhoenixOptions = {}): UsePhoenixReturn =>
     setError(null);
   }, []);
 
-  // Configuration functions
+  // Configuration functions with better type safety
   const setWebSocketUrl = useCallback((url: string): void => {
+    if (!url || typeof url !== 'string') {
+      console.warn('[usePhoenix] Invalid WebSocket URL provided');
+      return;
+    }
     phoenixClient.setWebSocketUrl(url);
   }, []);
 
-  const setAuthParams = useCallback((authParams: any): void => {
-    phoenixClient.setAuthParams(authParams);
-  }, []);
+  const setAuthParams = useCallback(
+    (authParams: Record<string, string | number | boolean>): void => {
+      if (authParams && typeof authParams === 'object') {
+        phoenixClient.setAuthParams(authParams);
+      } else {
+        console.warn('[usePhoenix] Invalid auth params provided');
+      }
+    },
+    []
+  );
 
   const clearConfig = useCallback((): void => {
     phoenixClient.clearConfig();
   }, []);
 
-  // Setup event listeners
+  // Setup event listeners once
   useEffect(() => {
-    // Add event listeners
+    // Add event listeners with stable handlers
     phoenixClient.addEventListener(PHOENIX_EVENTS.CONNECT, handleConnect);
     phoenixClient.addEventListener(PHOENIX_EVENTS.DISCONNECT, handleDisconnect);
     phoenixClient.addEventListener(PHOENIX_EVENTS.ERROR, handleError);
     phoenixClient.addEventListener(PHOENIX_EVENTS.RECONNECT, handleReconnect);
 
-    // Sync initial state
-    const currentState = phoenixClient.getConnectionState();
-    if (currentState !== connectionState) {
-      setConnectionState(currentState);
+    // Sync initial state only once
+    if (!hasInitializedRef.current) {
+      const currentState = phoenixClient.getConnectionState();
+      if (currentState !== connectionState) {
+        setConnectionState(currentState as UsePhoenixReturn['connectionState']);
+      }
     }
 
-    // Cleanup
+    // Cleanup function
     return () => {
       phoenixClient.removeEventListener(PHOENIX_EVENTS.CONNECT, handleConnect);
       phoenixClient.removeEventListener(PHOENIX_EVENTS.DISCONNECT, handleDisconnect);
       phoenixClient.removeEventListener(PHOENIX_EVENTS.ERROR, handleError);
       phoenixClient.removeEventListener(PHOENIX_EVENTS.RECONNECT, handleReconnect);
     };
-  }, [handleConnect, handleDisconnect, handleError, handleReconnect, connectionState]);
+  }, []); // Empty dependency array - handlers are stable
 
   // Handle long poll setting
   useEffect(() => {
@@ -144,6 +184,17 @@ export const usePhoenix = (options: UsePhoenixOptions = {}): UsePhoenixReturn =>
     };
   }, [autoConnect, disconnect]);
 
+  // Computed states with memoization
+  const computedStates = useMemo(
+    () => ({
+      isConnected: connectionState === 'connected',
+      isConnecting: connectionState === 'connecting',
+      isReconnecting: connectionState === 'reconnecting',
+      canConnect: connectionState === 'disconnected' || connectionState === 'error',
+    }),
+    [connectionState]
+  );
+
   // Memoized return value to prevent unnecessary re-renders
   return useMemo<UsePhoenixReturn>(
     () => ({
@@ -152,10 +203,7 @@ export const usePhoenix = (options: UsePhoenixOptions = {}): UsePhoenixReturn =>
       error,
 
       // Computed states
-      isConnected: connectionState === 'connected',
-      isConnecting: connectionState === 'connecting',
-      isReconnecting: connectionState === 'reconnecting',
-      canConnect: connectionState === 'disconnected' || connectionState === 'error',
+      ...computedStates,
 
       // Functions
       connect,
@@ -173,6 +221,10 @@ export const usePhoenix = (options: UsePhoenixOptions = {}): UsePhoenixReturn =>
     [
       connectionState,
       error,
+      computedStates.isConnected,
+      computedStates.isConnecting,
+      computedStates.isReconnecting,
+      computedStates.canConnect,
       connect,
       disconnect,
       resetConnection,

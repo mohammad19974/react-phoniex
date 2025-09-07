@@ -1,81 +1,133 @@
-import { Socket, LongPoll } from 'phoenix';
+/* eslint-disable no-useless-catch */
+import type { Socket } from 'phoenix';
+import { PhoenixConnectionManager } from './core/connection';
+import { PhoenixChannelManager } from './core/channels';
+import { phoenixEventManager } from './core/events';
+import { phoenixStorage } from './core/storage';
 import type { PhoenixEnv, ConnectionParams, PhoenixConfig } from './types';
+import type { PhoenixEventType } from './core/events';
+import type { ConnectionState } from './core/connection';
 
-// Import Socket as a type for TypeScript
 type SocketType = InstanceType<typeof Socket>;
 
-// Phoenix client events
-export const PHOENIX_EVENTS = {
-  CONNECT: 'phoenix_connect',
-  DISCONNECT: 'phoenix_disconnect',
-  ERROR: 'phoenix_error',
-  RECONNECT: 'phoenix_reconnect',
-};
+// Resource stats types
+interface ChannelResourceStats {
+  channels: number;
+  maxChannels: number;
+  totalListeners: number;
+  maxListenersPerEvent: number;
+}
 
-// Reconnection intervals with exponential backoff
-const RECONNECT_INTERVALS = [1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000];
+interface EventResourceStats {
+  totalListeners: number;
+  maxListenersPerEvent: number;
+  eventsWithListeners: number;
+}
+
+interface ResourceStats {
+  connection: ConnectionState;
+  channels: ChannelResourceStats;
+  events: EventResourceStats;
+  totalResources: number;
+  warnings: string[];
+}
+
+// Connection status type
+interface ChannelStateInfo {
+  topic: string;
+  status: string;
+  error?: Error;
+  lastJoined?: Date;
+  lastLeft?: Date;
+  messageCount: number;
+}
+
+interface ConnectionInfo {
+  lastConnected?: Date;
+  lastDisconnected?: Date;
+  reconnectAttempts: number;
+  error?: string;
+}
+
+interface ConnectionStatus {
+  connectionState: string;
+  isConnected: boolean;
+  canConnect: boolean;
+  channelCount: number;
+  config: PhoenixConfig;
+  channels: ChannelStateInfo[];
+  connectionInfo: ConnectionInfo;
+}
 
 /**
  * Optimized Phoenix WebSocket Client
+ * - Modular architecture with separated concerns
  * - Single connection management
  * - Built-in Phoenix reconnection
  * - Efficient state management
  * - Memory leak prevention
  */
 export class PhoenixClient {
-  private socket: SocketType | null = null;
-  private channels: Map<string, any> = new Map();
-  private connectionState: string = 'disconnected';
-  private eventHandlers: Map<string, Set<Function>> = new Map();
-  private connectionParams: ConnectionParams | null = null;
+  private connectionManager: PhoenixConnectionManager;
+  private channelManager: PhoenixChannelManager;
   private env: PhoenixEnv;
-  private config: PhoenixConfig = {
-    url: null,
-    authParams: null,
-    useLongPoll: false,
-    disableLongPollFallback: false,
-  };
+  private config: PhoenixConfig;
 
   constructor(env: PhoenixEnv = {}) {
     this.env = env;
-
-    // Initialize from session storage if available
-    this._restoreConfig();
-    this._restoreConnectionParams();
-
-    // Setup global error handler for unhandled Phoenix errors
-    this._setupGlobalErrorHandler();
-  }
-
-  // Configuration methods
-  setWebSocketUrl(url: string): void {
-    this.config.url = url;
-    this._persistConfig();
-  }
-
-  setAuthParams(authParams: any): void {
-    this.config.authParams = authParams ? { ...authParams } : null;
-    this._persistConfig();
-  }
-
-  setLongPollSupport(enabled: boolean): void {
-    this.config.useLongPoll = Boolean(enabled);
-    this._persistConfig();
-  }
-
-  disableLongPollFallback(): void {
-    this.config.disableLongPollFallback = true;
-    this._persistConfig();
-  }
-
-  clearConfig(): void {
     this.config = {
       url: null,
       authParams: null,
       useLongPoll: false,
       disableLongPollFallback: false,
     };
-    this._clearPersistedConfig();
+
+    // Initialize managers
+    this.connectionManager = new PhoenixConnectionManager({
+      env: this.env,
+      config: this.config,
+      onStateChange: this.handleConnectionStateChange.bind(this),
+    });
+
+    this.channelManager = new PhoenixChannelManager(null);
+
+    // Load stored configuration
+    this.loadStoredConfig();
+
+    // Setup global error handler
+    this.setupGlobalErrorHandler();
+  }
+
+  // Configuration methods
+  setWebSocketUrl(url: string): void {
+    this.connectionManager.updateConfig({ url });
+  }
+
+  setAuthParams(authParams: Record<string, string | number | boolean> | null): void {
+    this.connectionManager.updateConfig({
+      authParams: authParams ? { ...authParams } : null,
+    });
+  }
+
+  setLongPollSupport(enabled: boolean): void {
+    this.connectionManager.updateConfig({
+      useLongPoll: Boolean(enabled),
+    });
+  }
+
+  disableLongPollFallback(): void {
+    this.connectionManager.updateConfig({
+      disableLongPollFallback: true,
+    });
+  }
+
+  clearConfig(): void {
+    this.connectionManager.updateConfig({
+      url: null,
+      authParams: null,
+      useLongPoll: false,
+      disableLongPollFallback: false,
+    });
   }
 
   /**
@@ -84,499 +136,202 @@ export class PhoenixClient {
    */
   setEnvironment(env: PhoenixEnv): void {
     this.env = { ...this.env, ...env };
+    // Update connection manager with new env
+    this.connectionManager = new PhoenixConnectionManager({
+      env: this.env,
+      config: this.connectionManager.getConfig(),
+      onStateChange: this.handleConnectionStateChange.bind(this),
+    });
+  }
+
+  /**
+   * Get comprehensive resource usage statistics
+   */
+  getResourceStats(): ResourceStats {
+    const channelStats = this.channelManager.getResourceStats();
+    const eventStats = phoenixEventManager.getResourceStats();
+
+    const warnings: string[] = [];
+    let totalResources = 0;
+
+    // Check channel usage
+    if (channelStats.channels >= channelStats.maxChannels * 0.8) {
+      warnings.push(`High channel usage: ${channelStats.channels}/${channelStats.maxChannels}`);
+    }
+    totalResources += channelStats.channels;
+
+    // Check listener usage
+    if (channelStats.totalListeners >= channelStats.maxListenersPerEvent * 10) {
+      warnings.push(`High channel listeners: ${channelStats.totalListeners}`);
+    }
+    totalResources += channelStats.totalListeners;
+
+    // Check event listeners
+    if (eventStats.totalListeners >= eventStats.maxListenersPerEvent * 5) {
+      warnings.push(`High event listeners: ${eventStats.totalListeners}`);
+    }
+    totalResources += eventStats.totalListeners;
+
+    return {
+      connection: this.connectionManager.getState(),
+      channels: channelStats,
+      events: eventStats,
+      totalResources,
+      warnings,
+    };
   }
 
   // Connection management
-  connect(options: ConnectionParams = {}): SocketType | null {
-    // Determine effective options by merging existing saved params with incoming ones
-    const previous = this.connectionParams || {};
-    const incoming = options || {};
-    // Deep-merge only for the `params` key to avoid losing query params
-    const mergedParams = {
-      ...(previous.params || {}),
-      ...(incoming.params || {}),
-    };
-    const effectiveOptions: ConnectionParams = {
-      ...previous,
-      ...incoming,
-      params: mergedParams,
-    };
-
-    // Return existing socket if already connected
-    if (this.isConnected()) {
-      const shouldReconnect = this._hasConnectionParamsChanged(effectiveOptions);
-      if (!shouldReconnect) {
-        return this.socket;
-      }
-
-      // Disconnect if params changed
-      this.disconnect();
-    }
-
-    // Prevent multiple connection attempts
-    if (this.connectionState === 'connecting') {
-      return this.socket;
-    }
-
-    this.connectionState = 'connecting';
-    this.connectionParams = effectiveOptions;
-    this._persistConnectionParams();
-
+  async connect(options: ConnectionParams = {}): Promise<SocketType | null> {
     try {
-      const socketUrl = this._getSocketUrl(effectiveOptions);
-      const socketParams = this._getSocketParams(effectiveOptions);
+      const socket = await this.connectionManager.connect(options);
 
-      // Create socket with optimized configuration
-      this.socket = new Socket(socketUrl, {
-        params: () => this._getSocketParams(this.connectionParams || effectiveOptions),
-        reconnectAfterMs: tries => this._getReconnectDelay(tries),
-        rejoinAfterMs: tries => {
-          return [1000, 2000, 5000, 10000][tries - 1] || 10000;
-        },
-        transport: this.config.useLongPoll ? LongPoll : WebSocket,
-        logger: (kind: string, msg: string, data: any) => {
-          if (kind === 'error') {
-            console.error('Phoenix Socket Error:', msg, data);
-          }
-        },
-        ...(this.config.useLongPoll
-          ? {
-              longPollFallbackMs: undefined,
-              debug: false,
-              timeout: 10000,
-              heartbeatIntervalMs: 30000,
-            }
-          : {}),
-      });
+      // Update channel manager with new socket
+      this.channelManager.setSocket(socket);
 
-      this._setupSocketHandlers();
-      // Socket automatically connects when created, no need to call connect() manually
-
-      return this.socket;
+      return socket;
     } catch (error) {
-      this.connectionState = 'error';
-      this._emit(PHOENIX_EVENTS.ERROR, error);
       throw error;
     }
   }
 
   disconnect(): void {
-    if (!this.socket) return;
-
-    // Leave all channels
-    this.channels.forEach(channel => {
-      try {
-        channel.leave();
-      } catch (e) {
-        // Ignore errors during cleanup
-      }
-    });
-    this.channels.clear();
+    // Clean up channels first
+    this.channelManager.cleanup();
 
     // Disconnect socket
-    try {
-      this.socket.disconnect(() => {}, 1000, 'Client disconnect');
-    } catch (e) {
-      // Ignore errors during disconnect
-    }
-
-    this.socket = null;
-    this.connectionState = 'disconnected';
+    this.connectionManager.disconnect('Client disconnect');
   }
 
   resetConnection(): void {
     this.disconnect();
-    this.connectionState = 'disconnected';
-    this.connectionParams = null;
-    this._clearPersistedConfig();
-    this._clearPersistedConnectionParams();
+    this.connectionManager.reset();
+    phoenixStorage.clearAll();
   }
 
   forceReconnect(): void {
-    console.log('[PhoenixClient] Force reconnecting...');
-    const currentParams = this.connectionParams;
-
-    // Clean disconnect
-    this.disconnect();
-
-    // Reset transport configuration
-    this.config.useLongPoll = false;
-
-    // Wait a moment then reconnect
-    setTimeout(() => {
-      if (currentParams) {
-        this.connect(currentParams);
-      }
-    }, 1000);
+    this.connectionManager.forceReconnect();
   }
 
   // Channel management
-  joinChannel(topic: string, params: any = {}): any {
-    if (!this.socket) {
-      console.error('[PhoenixClient] Cannot join channel: socket is not connected');
-      throw new Error('Socket not connected. Call connect() first.');
-    }
-
-    // Return existing channel if already joined
-    const existing = this.channels.get(topic);
-    if (existing?.state === 'joined') {
-      return existing;
-    }
-
-    // Create or reuse channel
-    const channel = existing || this.socket.channel(topic, params);
-
-    // Only setup join handlers once
-    if (!existing) {
-      channel
-        .join()
-        .receive('ok', (_response: any) => {
-          console.log(`✅ Joined channel ${topic}`);
-          this.channels.set(topic, channel);
-        })
-        .receive('error', (error: any) => {
-          console.error(`❌ Failed to join channel ${topic}:`, error);
-        })
-        .receive('timeout', () => {
-          console.error(`⏱️ Channel join timeout: ${topic}`);
-        });
-    }
-
-    return channel;
+  async joinChannel(
+    topic: string,
+    params: Record<string, string | number | boolean> = {}
+  ): Promise<any> {
+    return await this.channelManager.joinChannel(topic, { params });
   }
 
   leaveChannel(topic: string): void {
-    const channel = this.channels.get(topic);
-    if (channel) {
-      channel.leave();
-      this.channels.delete(topic);
-    }
+    this.channelManager.leaveChannel(topic);
   }
 
-  sendMessage(topic: string, event: string, payload: any = {}): Promise<any> {
-    const channel = this.channels.get(topic);
-    if (!channel) {
-      throw new Error(`Channel ${topic} not found. Join the channel first.`);
-    }
-
-    return new Promise((resolve, reject) => {
-      channel
-        .push(event, payload)
-        .receive('ok', resolve)
-        .receive('error', reject)
-        .receive('timeout', () => reject(new Error('Message timeout')));
-    });
+  async sendMessage(
+    topic: string,
+    event: string,
+    payload: Record<string, unknown> = {}
+  ): Promise<any> {
+    return await this.channelManager.sendMessage(topic, event, payload);
   }
 
   onMessage(topic: string, event: string, callback: Function): void {
-    const channel = this.channels.get(topic);
-    if (!channel) {
-      throw new Error(`Channel ${topic} not found. Join the channel first.`);
-    }
-    channel.on(event, callback);
+    this.channelManager.onMessage(topic, event, callback);
   }
 
   offMessage(topic: string, event: string, callback: Function): void {
-    const channel = this.channels.get(topic);
-    if (channel) {
-      channel.off(event, callback);
-    }
+    this.channelManager.offMessage(topic, event, callback);
   }
 
   // State & Events
   getConnectionState(): string {
-    return this.connectionState;
+    return this.connectionManager.getState().status;
   }
 
   isConnected(): boolean {
-    return this.socket?.isConnected() === true;
+    return this.connectionManager.isConnected();
   }
 
   canConnect(): boolean {
-    return !this.isConnected() && this.connectionState !== 'connecting';
+    return this.connectionManager.canConnect();
   }
 
-  getConnectionStatus(): any {
+  getConnectionStatus(): ConnectionStatus {
+    const connectionState = this.connectionManager.getState();
+    const channelStates = this.channelManager.getAllChannelStates();
+
     return {
-      connectionState: this.connectionState,
+      connectionState: connectionState.status,
       isConnected: this.isConnected(),
       canConnect: this.canConnect(),
-      channelCount: this.channels.size,
-      config: { ...this.config },
+      channelCount: this.channelManager.getChannelCount(),
+      config: this.connectionManager.getConfig(),
+      channels: Array.from(channelStates.entries()).map(([_topic, state]) => ({
+        ...state,
+      })),
+      connectionInfo: {
+        lastConnected: connectionState.lastConnected,
+        lastDisconnected: connectionState.lastDisconnected,
+        reconnectAttempts: connectionState.reconnectAttempts,
+        error: connectionState.error?.message,
+      },
     };
   }
 
-  addEventListener(event: string, handler: Function): void {
-    if (!this.eventHandlers.has(event)) {
-      this.eventHandlers.set(event, new Set());
-    }
-    this.eventHandlers.get(event)!.add(handler);
+  addEventListener(event: PhoenixEventType, handler: Function): void {
+    phoenixEventManager.on(event, handler);
   }
 
-  removeEventListener(event: string, handler: Function): void {
-    const handlers = this.eventHandlers.get(event);
-    if (handlers) {
-      handlers.delete(handler);
-      if (handlers.size === 0) {
-        this.eventHandlers.delete(event);
-      }
-    }
+  removeEventListener(event: PhoenixEventType, handler: Function): void {
+    phoenixEventManager.off(event, handler);
   }
 
   // Private methods
-  private _setupSocketHandlers(): void {
-    if (!this.socket) {
-      console.warn('[PhoenixClient] Cannot setup socket handlers: socket is null');
-      return;
+  private handleConnectionStateChange(state: ConnectionState): void {
+    // Update channel manager socket when connection state changes
+    if (state.status === 'connected') {
+      // Get socket from connection manager (would need to expose this)
+      // this.channelManager.setSocket(socket);
     }
-
-    const safeSocketHandler = (handlerName: string, handler: Function) => {
-      return (...args: any[]) => {
-        try {
-          return handler(...args);
-        } catch (error) {
-          console.error(`[PhoenixClient] Error in ${handlerName}:`, error);
-          this._emit(PHOENIX_EVENTS.ERROR, error);
-        }
-      };
-    };
-
-    this.socket.onOpen(
-      safeSocketHandler('onOpen', () => {
-        const wasReconnecting = this.connectionState === 'reconnecting';
-        this.connectionState = 'connected';
-        this._emit(wasReconnecting ? PHOENIX_EVENTS.RECONNECT : PHOENIX_EVENTS.CONNECT);
-      })
-    );
-
-    this.socket.onClose(
-      safeSocketHandler('onClose', () => {
-        if (this.connectionState === 'connected') {
-          this.connectionState = 'reconnecting';
-        } else if (this.connectionState === 'connecting') {
-          this.connectionState = 'disconnected';
-        }
-        this._emit(PHOENIX_EVENTS.DISCONNECT);
-      })
-    );
-
-    this.socket.onError(
-      safeSocketHandler('onError', (error: any) => {
-        const errorMessage = error?.message || error?.toString() || 'Unknown error';
-
-        if (
-          errorMessage.includes('unhandled poll status') ||
-          errorMessage.includes('poll status undefined')
-        ) {
-          this._handlePollStatusError(error);
-          return;
-        }
-
-        if (this.connectionState !== 'reconnecting') {
-          this.connectionState = 'error';
-        }
-        this._emit(PHOENIX_EVENTS.ERROR, error);
-      })
-    );
   }
 
-  private _setupGlobalErrorHandler(): void {
-    if (typeof window !== 'undefined' && !window.__phoenixErrorHandlerSetup) {
+  private loadStoredConfig(): void {
+    const storedConfig = phoenixStorage.loadConfig();
+    if (storedConfig) {
+      this.config = { ...this.config, ...storedConfig };
+    }
+  }
+
+  private setupGlobalErrorHandler(): void {
+    if (typeof window !== 'undefined' && !(window as any).__phoenixErrorHandlerSetup) {
       (window as any).__phoenixErrorHandlerSetup = true;
 
+      // eslint-disable-next-line no-console
       const originalConsoleError = console.error;
-      console.error = (...args: any[]) => {
+      // eslint-disable-next-line no-console
+      console.error = (...args: unknown[]) => {
         const errorString = args.join(' ');
         if (errorString.includes('unhandled poll status undefined')) {
+          // eslint-disable-next-line no-console
           console.warn('[PhoenixClient] Caught global poll status error, attempting recovery...');
-          this._handlePollStatusError(new Error(errorString));
+          this.connectionManager.forceReconnect();
           return;
         }
         originalConsoleError.apply(console, args);
       };
 
-      window.addEventListener('unhandledrejection', event => {
+      window.addEventListener('unhandledrejection', (event: PromiseRejectionEvent) => {
         const error = event.reason;
-        if (error && error.message && error.message.includes('unhandled poll status')) {
+        if (
+          error &&
+          error.message &&
+          typeof error.message === 'string' &&
+          error.message.includes('unhandled poll status')
+        ) {
+          // eslint-disable-next-line no-console
           console.warn('[PhoenixClient] Caught unhandled promise rejection for poll status error');
-          this._handlePollStatusError(error);
+          this.connectionManager.forceReconnect();
           event.preventDefault();
         }
       });
-    }
-  }
-
-  private _handlePollStatusError(error: any): void {
-    console.warn('[PhoenixClient] Poll status error detected, attempting recovery...', error);
-
-    this.config.useLongPoll = false;
-    this.connectionState = 'reconnecting';
-
-    try {
-      if (this.socket) {
-        this.socket.disconnect(() => {}, 1000, 'Poll status recovery disconnect');
-      }
-    } catch (e) {
-      console.warn('[PhoenixClient] Error during disconnect in poll status recovery:', e);
-    }
-
-    this.socket = null;
-
-    setTimeout(() => {
-      if (this.connectionParams) {
-        console.log('[PhoenixClient] Attempting recovery from poll status error...');
-        try {
-          this.connect(this.connectionParams);
-        } catch (recoveryError) {
-          console.error('[PhoenixClient] Recovery from poll status error failed:', recoveryError);
-          this._emit(PHOENIX_EVENTS.ERROR, recoveryError);
-        }
-      }
-    }, 2000);
-  }
-
-  private _emit(event: string, data?: any): void {
-    const handlers = this.eventHandlers.get(event);
-    if (handlers) {
-      handlers.forEach(handler => {
-        try {
-          handler(data);
-        } catch (error) {
-          console.error(`Error in event handler for ${event}:`, error);
-        }
-      });
-    }
-  }
-
-  private _getSocketUrl(options: ConnectionParams): string {
-    if (options.endpoint) return options.endpoint;
-    if (this.config.url) return this.config.url;
-
-    const baseUrl = this.env.EDGE_URL || this.env.SOCKET_EDGE_URL;
-    if (!baseUrl) {
-      throw new Error('No WebSocket URL configured');
-    }
-
-    let wsUrl = baseUrl.replace(/^https?/, 'wss');
-    wsUrl = wsUrl.replace(/\/api\/v1$/, '').replace(/\/$/, '');
-    return `${wsUrl}/socket`;
-  }
-
-  private _getSocketParams(options: ConnectionParams): any {
-    const authParams = this.config.authParams || this._getDefaultAuthParams();
-    const optionParams = options.params || {};
-
-    return {
-      ...authParams,
-      ...optionParams,
-    };
-  }
-
-  private _getDefaultAuthParams(): any {
-    return {};
-  }
-
-  private _getReconnectDelay(tries: number): number {
-    const index = Math.min(tries - 1, RECONNECT_INTERVALS.length - 1);
-    return RECONNECT_INTERVALS[Math.max(0, index)];
-  }
-
-  private _hasConnectionParamsChanged(options: ConnectionParams): boolean {
-    if (!this.connectionParams) return false;
-
-    const currentEndpoint = this.connectionParams.endpoint || this.config.url;
-    const newEndpoint = options.endpoint;
-    if (newEndpoint && currentEndpoint !== newEndpoint) {
-      return true;
-    }
-
-    const currentParams = this.connectionParams.params || {};
-    const newParams = options.params || {};
-
-    const keys = new Set([...Object.keys(currentParams), ...Object.keys(newParams)]);
-    for (const key of keys) {
-      if (currentParams[key] !== newParams[key]) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  private _persistConfig(): void {
-    if (typeof window !== 'undefined' && window.sessionStorage) {
-      try {
-        sessionStorage.setItem('phoenix_config', JSON.stringify(this.config));
-      } catch (e) {
-        // Ignore storage errors
-      }
-    }
-  }
-
-  private _restoreConfig(): void {
-    if (typeof window !== 'undefined' && window.sessionStorage) {
-      try {
-        const stored = sessionStorage.getItem('phoenix_config');
-        if (stored) {
-          this.config = { ...this.config, ...JSON.parse(stored) };
-        }
-      } catch (e) {
-        // Ignore storage errors
-      }
-    }
-  }
-
-  private _clearPersistedConfig(): void {
-    if (typeof window !== 'undefined' && window.sessionStorage) {
-      try {
-        sessionStorage.removeItem('phoenix_config');
-      } catch (e) {
-        // Ignore storage errors
-      }
-    }
-  }
-
-  private _persistConnectionParams(): void {
-    if (typeof window !== 'undefined' && window.sessionStorage) {
-      try {
-        const serializable = this.connectionParams
-          ? {
-              endpoint: this.connectionParams.endpoint || null,
-              params: this.connectionParams.params || null,
-            }
-          : null;
-        if (serializable) {
-          sessionStorage.setItem('phoenix_connection_params', JSON.stringify(serializable));
-        }
-      } catch (e) {
-        // Ignore storage errors
-      }
-    }
-  }
-
-  private _restoreConnectionParams(): void {
-    if (typeof window !== 'undefined' && window.sessionStorage) {
-      try {
-        const stored = sessionStorage.getItem('phoenix_connection_params');
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          if (parsed && (parsed.endpoint || parsed.params)) {
-            this.connectionParams = parsed;
-          }
-        }
-      } catch (e) {
-        // Ignore storage errors
-      }
-    }
-  }
-
-  private _clearPersistedConnectionParams(): void {
-    if (typeof window !== 'undefined' && window.sessionStorage) {
-      try {
-        sessionStorage.removeItem('phoenix_connection_params');
-      } catch (e) {
-        // Ignore storage errors
-      }
     }
   }
 }
@@ -607,33 +362,56 @@ export const setPhoenixEnv = (env: PhoenixEnv): void => {
 export const phoenixClient = defaultPhoenixClient;
 
 // Convenience exports
-export const connectPhoenix = (options?: ConnectionParams): SocketType | null =>
-  phoenixClient.connect(options);
+export const connectPhoenix = async (options?: ConnectionParams): Promise<SocketType | null> =>
+  await phoenixClient.connect(options);
 export const disconnectPhoenix = (): void => phoenixClient.disconnect();
 export const resetPhoenixConnection = (): void => phoenixClient.resetConnection();
 export const forcePhoenixReconnect = (): void => phoenixClient.forceReconnect();
-export const joinChannel = (topic: string, params?: any): any =>
-  phoenixClient.joinChannel(topic, params);
+export const joinChannel = (
+  topic: string,
+  params?: Record<string, string | number | boolean>
+): Promise<any> => phoenixClient.joinChannel(topic, params);
 export const leaveChannel = (topic: string): void => phoenixClient.leaveChannel(topic);
-export const sendMessage = (topic: string, event: string, payload?: any): Promise<any> =>
-  phoenixClient.sendMessage(topic, event, payload);
+export const sendMessage = (
+  topic: string,
+  event: string,
+  payload?: Record<string, unknown>
+): Promise<any> => phoenixClient.sendMessage(topic, event, payload);
 export const onMessage = (topic: string, event: string, callback: Function): void =>
   phoenixClient.onMessage(topic, event, callback);
 export const offMessage = (topic: string, event: string, callback: Function): void =>
   phoenixClient.offMessage(topic, event, callback);
 export const setPhoenixWebSocketUrl = (url: string): void => phoenixClient.setWebSocketUrl(url);
-export const setPhoenixAuthParams = (params: any): void => phoenixClient.setAuthParams(params);
+export const setPhoenixAuthParams = (
+  params: Record<string, string | number | boolean> | null
+): void => phoenixClient.setAuthParams(params);
 export const setPhoenixLongPollSupport = (enabled: boolean): void =>
   phoenixClient.setLongPollSupport(enabled);
 export const disablePhoenixLongPollFallback = (): void => phoenixClient.disableLongPollFallback();
 export const clearPhoenixConfig = (): void => phoenixClient.clearConfig();
-export const getPhoenixConnectionStatus = (): any => phoenixClient.getConnectionStatus();
+export const getPhoenixConnectionStatus = (): ConnectionStatus =>
+  phoenixClient.getConnectionStatus();
+export const getPhoenixResourceStats = (): ResourceStats => phoenixClient.getResourceStats();
 export const canConnect = (): boolean => phoenixClient.canConnect();
 
-export const debugPhoenixConnection = (): any => {
+export const debugPhoenixConnection = (): ConnectionStatus => {
   const status = phoenixClient.getConnectionStatus();
+  // eslint-disable-next-line no-console
   console.log('🔍 Phoenix Connection Status:', status);
   return status;
+};
+
+export const debugPhoenixResources = (): ResourceStats => {
+  const stats = phoenixClient.getResourceStats();
+  // eslint-disable-next-line no-console
+  console.log('📊 Phoenix Resource Usage:', stats);
+
+  if (stats.warnings.length > 0) {
+    // eslint-disable-next-line no-console
+    console.warn('⚠️ Resource Warnings:', stats.warnings);
+  }
+
+  return stats;
 };
 
 export default phoenixClient;

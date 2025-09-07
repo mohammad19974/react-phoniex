@@ -1,10 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import {
-  PhoenixClient,
-  setPhoenixEnv,
-  initializePhoenixClient,
-  PHOENIX_EVENTS,
-} from '../phoenix-client';
+import { PhoenixClient, setPhoenixEnv, initializePhoenixClient } from '../phoenix-client';
+import { PHOENIX_EVENTS } from '../core/events';
 
 // Mock Phoenix Socket
 vi.mock('phoenix', () => ({
@@ -110,16 +106,14 @@ describe('PhoenixClient', () => {
   });
 
   describe('Channel Management', () => {
-    it('should throw error when joining channel without connection', () => {
-      expect(() => {
-        client.joinChannel('test:topic');
-      }).toThrow('Socket not connected');
+    it('should throw error when joining channel without connection', async () => {
+      await expect(client.joinChannel('test:topic')).rejects.toThrow('Socket not connected');
     });
 
-    it('should throw error when sending message without channel', () => {
-      expect(() => {
-        client.sendMessage('test:topic', 'test:event');
-      }).toThrow('Channel test:topic not found');
+    it('should throw error when sending message without channel', async () => {
+      await expect(client.sendMessage('test:topic', 'test:event')).rejects.toThrow(
+        'Channel test:topic not found'
+      );
     });
 
     it('should handle leaveChannel for non-existent channel', () => {
