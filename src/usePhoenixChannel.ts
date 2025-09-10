@@ -13,7 +13,7 @@ export const usePhoenixChannel = (
   topic: string,
   options: UsePhoenixChannelOptions = {}
 ): UsePhoenixChannelReturn => {
-  const { params = {}, autoJoin = true, onJoin, onLeave, onError } = options;
+  const { params = {}, autoJoin = false, onJoin, onLeave, onError } = options; //adding autojoin to true if you need connection wuth this hook
 
   // State management with better typing
   const [channelState, setChannelState] =
